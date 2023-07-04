@@ -1,6 +1,8 @@
 ''' LeIA - Léxico para Inferência Adaptada
 https://github.com/rafjaa/LeIA
 
+Versão com suporte para emojis - Paulo Dalpian
+
 Este projeto é um fork do léxico e ferramenta para análise de 
 sentimentos VADER (Valence Aware Dictionary and sEntiment Reasoner) 
 adaptado para textos em português.
@@ -12,6 +14,7 @@ Repositório: https://github.com/cjhutto/vaderSentiment
 
 import re
 import math
+import string
 import unicodedata
 from itertools import product
 import os
@@ -137,36 +140,22 @@ class SentiText(object):
             text = str(text).encode('utf-8')
         self.text = text
         self.words_and_emoticons = self._words_and_emoticons()
-        
         # Doesn't separate words from adjacent
         # punctuation (keeps emoticons & contractions)
         self.is_cap_diff = allcap_differential(self.words_and_emoticons)
 
-
-    def _words_plus_punc(self):
+    @staticmethod
+    def _strip_punc_if_word(token):
         """
-        Returns mapping of form:
-        {
-            'cat,': 'cat',
-            ',cat': 'cat',
-        }
+        Removes all trailing and leading punctuation
+        If the resulting string has two or fewer characters,
+        then it was likely an emoticon, so return original string
+        (ie ":)" stripped would be "", so just return ":)"
         """
-        no_punc_text = REGEX_REMOVE_PUNCTUATION.sub('', self.text)
-        
-        # Removes punctuation (but loses emoticons & contractions)
-        words_only = no_punc_text.split()
-        
-        # Remove singletons
-        words_only = set(w for w in words_only if len(w) > 1)
-        
-        # The product gives ('cat', ',') and (',', 'cat')
-        punc_before = {''.join(p): p[1] for p in product(PUNC_LIST, words_only)}
-        punc_after = {''.join(p): p[0] for p in product(words_only, PUNC_LIST)}
-        words_punc_dict = punc_before
-        words_punc_dict.update(punc_after)
-
-        return words_punc_dict
-
+        stripped = token.strip(string.punctuation)
+        if len(stripped) <= 2:
+            return token
+        return stripped
 
     def _words_and_emoticons(self):
         """
@@ -175,12 +164,22 @@ class SentiText(object):
             Does not preserve punc-plus-letter emoticons (e.g. :D)
         """
         wes = self.text.split()
-        words_punc_dict = self._words_plus_punc()
-        wes = [we for we in wes if len(we) > 1]
-        for i, we in enumerate(wes):
-            if we in words_punc_dict:
-                wes[i] = words_punc_dict[we]
-        return wes
+        stripped = list(map(self._strip_punc_if_word, wes))
+        return stripped
+    # def _words_and_emoticons(self):
+    #     """
+    #     Removes leading and trailing puncutation
+    #     Leaves contractions and most emoticons
+    #         Does not preserve punc-plus-letter emoticons (e.g. :D)
+    #     """
+    #     wes = self.text.split()
+    #     words_punc_dict = self._words_plus_punc()
+    #     wes = [we for we in wes if len(we) > 1]
+    #     for i, we in enumerate(wes):
+    #         if we in words_punc_dict:
+    #             wes[i] = words_punc_dict[we]
+    #     return wes
+
 
 
 class SentimentIntensityAnalyzer(object):
@@ -215,8 +214,8 @@ class SentimentIntensityAnalyzer(object):
         Convert lexicon file to a dictionary
         """
         lex_dict = {}
-        for line in self.lexicon_full_filepath.split('\n'):
-            if len(line) < 1:
+        for line in self.lexicon_full_filepath.rstrip('\n').split('\n'):
+            if not line:
                 continue
             (word, measure) = line.strip().split('\t')[0:2]
             lex_dict[word] = float(measure)
@@ -228,9 +227,7 @@ class SentimentIntensityAnalyzer(object):
         Convert emoji lexicon file to a dictionary
         """
         emoji_dict = {}
-        for line in self.emoji_full_filepath.split('\n'):
-            if len(line) < 1:
-                continue
+        for line in self.emoji_full_filepath.rstrip('\n').split('\n'):
             (emoji, description) = line.strip().split('\t')[0:2]
             emoji_dict[emoji] = description
         return emoji_dict
@@ -244,29 +241,39 @@ class SentimentIntensityAnalyzer(object):
         """
 
         # Remove acentos
-        text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII')
+        x = "ãÃáÁàÀéÉêÊéÉóÓôÔúÚ"
+        y = "aAaAaAeEeEeEoOoOuU"
+        mytable = str.maketrans(x, y)
+        text = text.translate(mytable)
 
         # convert emojis to their textual descriptions
-        text_token_list = text.split()
-        text_no_emoji_lst = []
-        for token in text_token_list:
-            if token in self.emojis:
+        text_no_emoji = ""
+        prev_space = True
+        for chr in text:
+            if chr in self.emojis:
                 # get the textual description
-                description = self.emojis[token]
-                text_no_emoji_lst.append(description)
+                description = self.emojis[chr]
+                if not prev_space:
+                    text_no_emoji += ' '
+                text_no_emoji += description
+                prev_space = False
             else:
-                text_no_emoji_lst.append(token)
-        text = " ".join(x for x in text_no_emoji_lst)
+                text_no_emoji += chr
+                prev_space = chr == ' '
+        text = text_no_emoji.strip()
 
         sentitext = SentiText(text)
 
         sentiments = []
         words_and_emoticons = sentitext.words_and_emoticons
-        for item in words_and_emoticons:
+        for i, item in enumerate(words_and_emoticons):
             valence = 0
-            i = words_and_emoticons.index(item)
             # check for vader_lexicon words that may be used as modifiers or negations
             if item.lower() in BOOSTER_DICT:
+                sentiments.append(valence)
+                continue
+            if (i < len(words_and_emoticons) - 1 and item.lower() == "kind" and
+                    words_and_emoticons[i + 1].lower() == "of"):
                 sentiments.append(valence)
                 continue
 
@@ -277,15 +284,22 @@ class SentimentIntensityAnalyzer(object):
 
         return valence_dict
 
-
     def sentiment_valence(self, valence, sentitext, item, i, sentiments):
         is_cap_diff = sentitext.is_cap_diff
         words_and_emoticons = sentitext.words_and_emoticons
         item_lowercase = item.lower()
         if item_lowercase in self.lexicon:
-
             # Get the sentiment valence
             valence = self.lexicon[item_lowercase]
+
+            # check for "nao" as negation for an adjacent lexicon item vs "no" as its own stand-alone lexicon item
+            if item_lowercase == "nao" and i != len(words_and_emoticons)-1 and words_and_emoticons[i + 1].lower() in self.lexicon:
+                # don't use valence of "no" as a lexicon item. Instead set it's valence to 0.0 and negate the next item
+                valence = 0.0
+            if (i > 0 and words_and_emoticons[i - 1].lower() == "nao") \
+               or (i > 1 and words_and_emoticons[i - 2].lower() == "nao") \
+               or (i > 2 and words_and_emoticons[i - 3].lower() == "nao" and words_and_emoticons[i - 1].lower() in ["ou", "nem"] ):
+                valence = self.lexicon[item_lowercase] * N_SCALAR
 
             # Check if sentiment laden word is in ALL CAPS (while others aren't)
             if item.isupper() and is_cap_diff:
@@ -309,23 +323,21 @@ class SentimentIntensityAnalyzer(object):
                     if start_i == 2:
                         valence = self._special_idioms_check(valence, words_and_emoticons, i)
 
-            # valence = self._least_check(valence, words_and_emoticons, i)
+            valence = self._least_check(valence, words_and_emoticons, i)
         sentiments.append(valence)
 
         return sentiments
 
-
-    # TODO: Portuguese
-    # def _least_check(self, valence, words_and_emoticons, i):
-    #     # check for negation case using "least"
-    #     if i > 1 and words_and_emoticons[i - 1].lower() not in self.lexicon \
-    #             and words_and_emoticons[i - 1].lower() == "least":
-    #         if words_and_emoticons[i - 2].lower() != "at" and words_and_emoticons[i - 2].lower() != "very":
-    #             valence = valence * N_SCALAR
-    #     elif i > 0 and words_and_emoticons[i - 1].lower() not in self.lexicon \
-    #             and words_and_emoticons[i - 1].lower() == "least":
-    #         valence = valence * N_SCALAR
-    #     return valence
+    def _least_check(self, valence, words_and_emoticons, i):
+        # check for negation case using "menos"
+        if i > 1 and words_and_emoticons[i - 1].lower() not in self.lexicon \
+                and words_and_emoticons[i - 1].lower() == "menos":
+            if words_and_emoticons[i - 2].lower() != "ao" and words_and_emoticons[i - 2].lower() != "pelo":
+                valence = valence * N_SCALAR
+        elif i > 0 and words_and_emoticons[i - 1].lower() not in self.lexicon \
+                and words_and_emoticons[i - 1].lower() == "menos":
+            valence = valence * N_SCALAR
+        return valence
 
 
     @staticmethod
